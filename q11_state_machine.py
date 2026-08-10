@@ -343,6 +343,10 @@ def process_outcome(
         "resultClass": outcome.resultClass,
         "nonce": outcome.nonce,
     }
+    # A zero HTTP status is ambiguous without the authoritative error class.
+    # Persist it so the receipt log and CLIENT span describe the same timeout.
+    if outcome.errorType:
+        flat_receipt["errorType"] = outcome.errorType
     if "receiptLog" not in state:
         state["receiptLog"] = []
     state["receiptLog"].append(flat_receipt)
@@ -354,7 +358,7 @@ def process_outcome(
             return _handle_503_retry(state, action_id, call_id, receipt_id, outcome)
         del pending[action_id]
         return _handle_diagnostic_failure(state, action_id, "diagnostic_failed")
-    elif status == 0 and outcome.errorType == "timeout":
+    elif status == 0 or outcome.errorType == "timeout":
         del pending[action_id]
         return _handle_diagnostic_failure(state, action_id, "diagnostic_timed_out")
     elif status == 200 or status == 201:
@@ -741,6 +745,8 @@ def process_effect_outcome(
         "resultClass": outcome.resultClass,
         "nonce": outcome.nonce,
     }
+    if outcome.errorType:
+        flat["errorType"] = outcome.errorType
     state.setdefault("receiptLog", []).append(flat)
 
     _update_client_span(state, action_id, outcome.attempt, receipt_id, outcome)
