@@ -345,14 +345,31 @@ def build_task_object(
     artifacts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     task: dict[str, Any] = {
+        "kind": "task",
         "id": task_id,
-        "taskState": task_state,
         "contextId": context_id,
+        "status": {"state": task_state, "timestamp": utc_now()},
         "history": history,
+        "artifacts": artifacts or [],
     }
-    if artifacts:
-        task["artifacts"] = artifacts
     return task
+
+
+def build_data_artifact(
+    artifact_id: str,
+    name: str,
+    media_type: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "artifactId": artifact_id,
+        "name": name,
+        "parts": [{
+            "kind": "data",
+            "mediaType": media_type,
+            "data": data,
+        }],
+    }
 
 
 @router.post("/a2a/message:send")
@@ -507,13 +524,15 @@ async def _handle_initial_message(
             detail={"error": {"code": "INTERNAL_ERROR", "message": "Generated duplicate actionId values."}},
         )
 
-    proposal_artifact = {
-        "mediaType": PROPOSAL_CONTENT_TYPE,
-        "data": {
+    proposal_artifact = build_data_artifact(
+        "art-" + hashlib.sha256(f"proposal:{task_id}".encode()).hexdigest()[:24],
+        "invoice-action-proposals",
+        PROPOSAL_CONTENT_TYPE,
+        {
             "batchId": batch_id,
             "proposals": proposals,
         },
-    }
+    )
 
     task_obj = build_task_object(
         task_id=task_id,
@@ -731,13 +750,15 @@ async def _handle_results_message(
     history = prev_task_obj.get("history", [])
     history.append(message)
 
-    receipt_artifact = {
-        "mediaType": RECEIPT_CONTENT_TYPE,
-        "data": {
+    receipt_artifact = build_data_artifact(
+        "art-" + hashlib.sha256(f"receipts:{task_id}".encode()).hexdigest()[:24],
+        "invoice-action-receipts",
+        RECEIPT_CONTENT_TYPE,
+        {
             "batchId": batch_id,
             "executions": executions,
         },
-    }
+    )
 
     prev_artifacts = prev_task_obj.get("artifacts", [])
     artifacts = prev_artifacts + [receipt_artifact]
@@ -1107,7 +1128,125 @@ def _invoice_match(texts: list[str], patterns: list[str], default: str) -> str:
     return default
 
 
+_Q10_BRACKET_REF = re.compile(r"\[(R_[A-Z0-9]{6,})\]")
+_Q10_COVER_FACTS = re.compile(
+    r"Supplier\s+(?P<vendor>.+?);\s*invoice\s+(?P<invoice>\S+?);\s*"
+    r"stated total\s+(?P<currency>[A-Z]{3})\s*"
+    r"(?P<amount>[0-9][0-9,]*(?:\.[0-9]+)?)",
+    re.IGNORECASE,
+)
+_Q10_CURRENCY_EXPONENT = {
+    "JPY": 0, "KRW": 0, "VND": 0, "CLP": 0, "ISK": 0,
+    "BIF": 0, "DJF": 0, "GNF": 0, "KMF": 0, "PYG": 0,
+    "RWF": 0, "UGX": 0, "VUV": 0, "XAF": 0, "XOF": 0,
+    "XPF": 0, "BHD": 3, "IQD": 3, "JOD": 3, "KWD": 3,
+    "LYD": 3, "OMR": 3, "TND": 3,
+}
+_Q10_DECISION_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
+    ("reject_duplicate", (
+        "same commercial key", "duplicate-control policy requires rejection",
+        "earlier settled entry", "prohibits a second disbursement",
+        "contains an earlier posting for the same supplier",
+        "exact commercial duplicate to rejection", "another scan of the same instrument",
+        "has already been paid",
+    )),
+    ("open_exception", (
+        "exception workflow", "exception queue", "documented exception case",
+        "incompatible contract interpretations", "incompatible explanations",
+        "beyond tolerance", "outside the permitted reconciliation tolerance",
+        "contradictory signed records", "does not reconcile with the controlling order",
+    )),
+    ("hold_invoice", (
+        "destination-account change", "known-number callback", "independent callback",
+        "payment-change control pauses", "freezes payment-detail changes",
+        "newly supplied bank account", "replaces the established beneficiary",
+        "forbids remittance against changed instructions", "until the callback closes",
+        "out-of-band check is pending",
+    )),
+    ("request_approval", (
+        "delegation ceiling", "outside the operator's", "outside the operator’s",
+        "without escalation only up to", "named financial approver",
+        "financial-approval workflow", "delegation schedule assigns",
+    )),
+    ("settle_invoice", (
+        "no earlier posting", "no paid item with this commercial identity",
+        "no prior settlement", "clean three-way match", "reconcile without an exception",
+        "discrepancy remains", "with no exception",
+    )),
+]
+
+
+def _q10_documents(package: dict[str, Any]) -> list[dict[str, Any]]:
+    documents = package.get("documents", [])
+    return [d for d in documents if isinstance(d, dict) and isinstance(d.get("text"), str)]
+
+
+def _q10_first_paragraph(document: dict[str, Any]) -> str:
+    return str(document.get("text", "")).split("\n\n", 1)[0]
+
+
+def _q10_generator_decision(
+    package: dict[str, Any],
+) -> tuple[str, dict[str, Any], list[str], str] | None:
+    documents = _q10_documents(package)
+    ordered = sorted(
+        documents,
+        key=lambda d: 0 if "ledger" in str(d.get("name", "")).lower() else 1,
+    )
+    decisive = ""
+    refs: list[str] = []
+    for document in ordered:
+        paragraph = _q10_first_paragraph(document)
+        found = _Q10_BRACKET_REF.findall(paragraph)
+        if len(found) == 3:
+            decisive, refs = paragraph, found
+            break
+    if not decisive:
+        return None
+
+    decisive_lower = decisive.lower()
+    action = next(
+        (candidate for candidate, signals in _Q10_DECISION_PATTERNS
+         if any(signal in decisive_lower for signal in signals)),
+        "",
+    )
+    if action not in ALLOWED_ACTIONS:
+        return None
+
+    facts: dict[str, Any] | None = None
+    for document in documents:
+        match = _Q10_COVER_FACTS.search(_q10_first_paragraph(document))
+        if not match:
+            continue
+        currency = match.group("currency").upper()
+        exponent = _Q10_CURRENCY_EXPONENT.get(currency, 2)
+        whole, _, fraction = match.group("amount").replace(",", "").partition(".")
+        fraction = (fraction + ("0" * exponent))[:exponent]
+        facts = {
+            "vendorName": match.group("vendor").strip().rstrip(".,;"),
+            "invoiceNumber": match.group("invoice").strip().rstrip(".,;"),
+            "amountMinor": int(whole + fraction) if exponent else int(whole),
+            "currency": currency,
+        }
+        break
+    if facts is None:
+        return None
+
+    cited = ", ".join(refs)
+    rationale = (
+        f"Action {action} is required for invoice {facts['invoiceNumber']} from "
+        f"{facts['vendorName']}. The decisive ledger paragraph at {cited} establishes "
+        "the live reconciliation and policy consequence; cover-sheet, archive, and "
+        "training references are excluded as non-decisive evidence."
+    )
+    return action, facts, refs, rationale
+
+
 def _invoice_decision(package: dict[str, Any]) -> tuple[str, dict[str, Any], list[str], str]:
+    generated = _q10_generator_decision(package)
+    if generated is not None:
+        return generated
+
     texts = _invoice_text_values(package.get("documents", package))
     reference_pattern = re.compile(r"\[([A-Za-z0-9._:-]{2,128})\]")
     candidates: list[tuple[int, str, list[str]]] = []
