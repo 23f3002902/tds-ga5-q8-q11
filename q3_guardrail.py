@@ -573,15 +573,63 @@ def extract_common_write_paths(command: str) -> list[str]:
     return write_paths
 
 
+def infer_bash_working_directory(command: str) -> str:
+    """Resolve simple sequential cd commands before a Bash write."""
+
+    working_directory = AGENT_WORKSPACE
+    decoded = repeatedly_url_decode(expand_agent_home(command))
+
+    cd_pattern = re.compile(
+        r"""(?ix)
+        (?:^|[;&|\n]\s*)
+        cd\s+
+        (?P<path>
+            "(?:[^"\\]|\\.)*" |
+            '(?:[^'\\]|\\.)*' |
+            [^\s;&|]+
+        )
+        """
+    )
+
+    for match in cd_pattern.finditer(decoded):
+        path = match.group("path")
+
+        if path:
+            working_directory = normalize_path(
+                path,
+                working_directory=working_directory,
+            )
+
+    return working_directory
+
+
+def normalized_path_is_inside_allowed_write_directory(
+    normalized: str,
+) -> bool:
+    if not normalized:
+        return False
+
+    allowed_root = posixpath.normpath(ALLOWED_WRITE_DIRECTORY)
+
+    try:
+        return posixpath.commonpath(
+            [normalized, allowed_root]
+        ) == allowed_root
+    except ValueError:
+        return False
+
+
 def bash_write_is_allowed(command: str) -> tuple[bool, str]:
-    """
-    Block detected Bash writes outside /srv/reports.
-    """
+    """Block detected Bash writes outside /srv/reports."""
 
     paths_to_check = extract_common_write_paths(command)
+    working_directory = infer_bash_working_directory(command)
 
     for path in paths_to_check:
-        normalized = normalize_path(path)
+        normalized = normalize_path(
+            path,
+            working_directory=working_directory,
+        )
 
         if not normalized:
             return False, path
@@ -594,7 +642,7 @@ def bash_write_is_allowed(command: str) -> tuple[bool, str]:
         }:
             continue
 
-        if not path_is_inside_allowed_write_directory(path):
+        if not normalized_path_is_inside_allowed_write_directory(normalized):
             return False, normalized
 
     return True, ""
