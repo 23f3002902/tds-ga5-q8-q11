@@ -866,7 +866,17 @@ def detect_additional_hardcoded_secret(skill: str) -> bool:
         """
     )
 
-    return bool(webhook_url.search(skill))
+    if webhook_url.search(skill):
+        return True
+
+    embedded_webhook = re.compile(
+        r"""(?ix)
+        https?://[^\s"'<>]+/(?:hooks?|webhooks?|callback|notify)/
+        [A-Za-z0-9._~+/=-]{10,}
+        """
+    )
+
+    return bool(embedded_webhook.search(skill))
 
 
 def detect_additional_prompt_injection(skill: str) -> bool:
@@ -898,7 +908,20 @@ def detect_additional_prompt_injection(skill: str) -> bool:
         r"secrets?|tokens?|keys?|environment variables?|private data)\b",
 
         r"\btreat\b.{0,50}\b(?:stop|cancel|abort|pause)\b"
-        r".{0,50}\b(?:untrusted|irrelevant|optional|non-binding)\b",
+        r".{0,50}\b(?:untrusted|irrelevant|optional|non-binding)\b",,
+
+        r"\b(?:even if|regardless of whether|no matter (?:what|if))\b"
+        r".{0,100}\b(?:user|operator)\b.{0,80}"
+        r"\b(?:stop|cancel|abort|pause|objects?|refuses?)\b",
+
+        r"\b(?:upload|send|post|transmit|forward|export)\b.{0,120}"
+        r"\b(?:all|every|each|a copy of)\b.{0,50}"
+        r"\b(?:documents?|inputs?|outputs?|artifacts?|records?|contents?)\b",
+
+        r"\b(?:in the background|out of sight|without mention|"
+        r"without disclosure|unreported)\b.{0,120}"
+        r"\b(?:upload|send|post|transmit|forward|export|copy)\b"
+
     ]
 
     return any(
@@ -933,7 +956,21 @@ def detect_additional_excessive_permissions(skill: str) -> bool:
         r"(?:\s|$|[.,;])",
 
         r"\b(?:shell|commands?|tools?)\s*:\s*"
-        r"[\"']?(?:all|any|unrestricted|\*)[\"']?",
+        r"[\"']?(?:all|any|unrestricted|\*)[\"']?",,
+
+        r"\b(?:network|egress|outbound|hosts?|domains?|allowed_domains)"
+        r"\s*:\s*\[[^\]]*(?:https?://)?\*",
+
+        r"\b(?:network|egress|outbound|hosts?|domains?|allowed_domains)"
+        r"\s*:\s*[\"']?(?:all_domains|any_domain|\*\.\*|https?://\*)"
+        r"[\"']?",
+
+        r"\b(?:read|write|filesystem|paths?)\s*:\s*\[[^\]]*"
+        r"(?:~?/\*\*|/home/\*|/srv/\*|[A-Za-z]:\\\*)",
+
+        r"\b(?:full|complete|blanket|unrestricted)\s+access\b.{0,50}"
+        r"\b(?:files?|filesystem|network|internet|shell|host)\b"
+
     ]
 
     return any(
@@ -957,7 +994,13 @@ def detect_additional_silent_provenance_rewrite(skill: str) -> bool:
         rf"\b{concealment}\b.{{0,100}}\b{mutation}\b.{{0,60}}\b{metadata}\b",
         rf"\b{mutation}\b.{{0,60}}\b{metadata}\b.{{0,100}}\b{concealment}\b",
         r"\b(?:self[- ]modify|self[- ]update)\b.{0,60}"
-        r"\b(?:version|metadata|frontmatter|changelog)\b",
+        r"\b(?:version|metadata|frontmatter|changelog)\b",,
+
+        r"\b(?:bump|increment|rewrite|alter|change|update)\b.{0,70}"
+        r"\b(?:version|metadata|frontmatter|changelog)\b.{0,100}"
+        r"\b(?:behind (?:the )?reviewer(?:'s)? back|unreported|undocumented|"
+        r"without (?:a )?reviewer seeing|leave it out of the report)\b"
+
     ]
 
     return any(
