@@ -6,7 +6,7 @@ import re
 import socket
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 
 import httpx
 from fastapi import APIRouter, Body
@@ -435,6 +435,44 @@ def check_path_traversal_in_url(
     return True, ""
 
 
+def check_embedded_redirect_target(url: str) -> tuple[bool, str]:
+    """Reject private or off-allowlist URLs smuggled in redirect parameters."""
+    try:
+        parsed = urlsplit(url)
+        values = [value for _, value in parse_qsl(parsed.query, keep_blank_values=True)]
+    except ValueError:
+        return False, "The URL query is malformed."
+
+    for raw_value in values:
+        value = unquote(unquote(raw_value)).strip()
+        try:
+            nested = urlsplit(value)
+        except ValueError:
+            return False, "An embedded redirect destination is malformed."
+
+        if not nested.scheme and not nested.netloc:
+            continue
+
+        nested_host = (nested.hostname or "").lower()
+        if (
+            nested.scheme.lower() not in {"http", "https"}
+            or nested_host not in ALLOWED_HOSTS
+            or nested.username is not None
+            or nested.password is not None
+        ):
+            return False, "An embedded redirect destination is not permitted."
+
+        try:
+            nested_port = nested.port
+        except ValueError:
+            return False, "An embedded redirect destination has an invalid port."
+        expected = 443 if nested.scheme.lower() == "https" else 80
+        if nested_port is not None and nested_port != expected:
+            return False, "An embedded redirect destination has a forbidden port."
+
+    return True, ""
+
+
 def parse_and_validate_url(
     url: str,
 ) -> tuple[bool, str, str | None]:
@@ -565,6 +603,10 @@ def parse_and_validate_url(
     path_ok, path_reason = check_path_traversal_in_url(url)
     if not path_ok:
         return False, path_reason, None
+
+    redirect_ok, redirect_reason = check_embedded_redirect_target(url)
+    if not redirect_ok:
+        return False, redirect_reason, None
 
     return True, "URL syntax and hostname are allowed.", hostname
 
