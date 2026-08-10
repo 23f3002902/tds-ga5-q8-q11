@@ -1946,6 +1946,12 @@ def deterministic_test_proposals(
     for job in dossier_jobs:
         dossier = job["dossier"]
 
+        if os.environ.get("CAPTURE_GA_FIXTURES", "").strip() == "1":
+            logger.info(
+                "ga5_q9_fixture=%s",
+                json.dumps(dossier, ensure_ascii=False, separators=(",", ":")),
+            )
+
         proposals.append(
             {
                 "dossierId": (
