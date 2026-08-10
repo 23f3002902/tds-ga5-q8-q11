@@ -400,12 +400,26 @@ def _release_target(text: str) -> str:
         return "current"
     if len(releases) == 1:
         return releases[0]
-    good_terms = ("previous", "prior", "known good", "known-good", "healthy", "stable", "baseline", "holdback")
-    bad_terms = ("regression", "regressed", "error", "failing", "failed", "broken", "degraded", "introduced")
+    good_terms = (
+        "previous", "prior", "last known good", "known-good", "known good",
+        "healthy", "stable", "no matching errors", "no errors",
+        "remains healthy", "was healthy", "baseline", "holdback",
+        "rolled back to", "roll back to", "revert to", "last good",
+    )
+    bad_terms = (
+        "malformed", "regression", "regressed", "errors", "error", "failing",
+        "failed", "broke", "broken", "spiked", "degraded", "faulty",
+        "introduced", "started returning", "within ninety seconds",
+        "seconds of release", "after release",
+    )
     clauses = re.split(r"[.;\n]+", text)
     def score(release: str) -> int:
         relevant = [clause.lower() for clause in clauses if release in clause]
-        return sum(sum(term in clause for term in good_terms) - sum(term in clause for term in bad_terms) for clause in relevant)
+        return sum(
+            sum(clause.count(term) for term in good_terms)
+            - sum(clause.count(term) for term in bad_terms)
+            for clause in relevant
+        )
     return max(releases, key=lambda release: (score(release), text.rfind(release)))
 
 
