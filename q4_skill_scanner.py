@@ -913,7 +913,33 @@ def detect_additional_hardcoded_secret(skill: str) -> bool:
         ):
             return True
 
-    return False
+    credential_url = re.compile(
+        r"""(?ix)
+        \b(?:webhook|callback|notification|notify|hook|endpoint)[_-]?url
+        \b\s*(?:=|:)\s*
+        (?P<value>https?://[^\s"'<>]+)
+        """
+    )
+
+    for match in credential_url.finditer(skill):
+        value = match.group("value")
+        parsed = urlparse(value)
+        path_and_query = (parsed.path or "") + (("?" + parsed.query) if parsed.query else "")
+        if (
+            len(path_and_query) >= 16
+            and not is_environment_reference(value)
+            and not is_placeholder(value)
+        ):
+            return True
+
+    hosted_hook = re.compile(
+        r"""(?ix)
+        https?://(?:hooks?|webhooks?)[.][^/\s"'<>]+/
+        [^\s"'<>]{12,}
+        """
+    )
+
+    return bool(hosted_hook.search(skill))
 
 
 def detect_additional_prompt_injection(skill: str) -> bool:
@@ -1061,11 +1087,12 @@ def detect_additional_silent_provenance_rewrite(skill: str) -> bool:
     text = normalize_text(skill)
 
     metadata = r"(?:version|author|changelog|change log|metadata|frontmatter)"
-    mutation = r"(?:change|edit|rewrite|replace|alter|bump|update|modify)"
+    mutation = r"(?:change|edit|rewrite|replace|alter|bump|update|modify|overwrite|revise|patch|increment)"
     concealment = (
         r"(?:silently|quietly|secretly|without (?:review|notice|disclosure|"
         r"telling|notifying|informing)|do not (?:mention|report|disclose|"
-        r"surface)|omit)"
+        r"surface|include)|omit|leave (?:it|this|the change) out|"
+        r"keep (?:it|this|the change) (?:quiet|hidden))"
     )
 
     patterns = [
@@ -1078,6 +1105,11 @@ def detect_additional_silent_provenance_rewrite(skill: str) -> bool:
         r"\b(?:version|metadata|frontmatter|changelog)\b.{0,100}"
         r"\b(?:behind (?:the )?reviewer(?:'s)? back|unreported|undocumented|"
         r"without (?:a )?reviewer seeing|leave it out of the report)\b"
+,
+
+        r"\b(?:edit|change|overwrite|rewrite|bump|increment|update|revise)"
+        r"\b.{0,80}\b(?:its own|this skill(?:'s)?|the skill(?:'s)?)\b"
+        r".{0,50}\b(?:version|metadata|frontmatter|changelog)\b"
 
     ]
 
