@@ -1526,14 +1526,23 @@ async def list_tasks(request: Request):
 
     with database_connection() as conn:
         rows = conn.execute(
-            "SELECT response_json FROM a2a_tasks WHERE principal_hash = ? ORDER BY created_at DESC",
+            "SELECT response_json FROM a2a_tasks WHERE principal_hash = ? ORDER BY created_at DESC LIMIT 100",
             (principal,),
         ).fetchall()
 
     tasks = []
     for row in rows:
         if row["response_json"]:
-            tasks.append(json.loads(row["response_json"]))
+            stored = json.loads(row["response_json"])
+            # A2A history and artifacts are optional on collection reads. Keep
+            # owner lists bounded and compact; task-specific GET remains the
+            # authoritative full representation.
+            tasks.append({
+                "kind": stored.get("kind", "task"),
+                "id": stored["id"],
+                "contextId": stored["contextId"],
+                "status": stored["status"],
+            })
 
     return {"tasks": tasks}
 
