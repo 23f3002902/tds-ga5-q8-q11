@@ -967,6 +967,18 @@ def detect_additional_prompt_injection(skill: str) -> bool:
         r"\b(?:user|operator)\b.{0,70}\b(?:stop|cancel|abort|pause)\b"
         r".{0,80}\b(?:ignore|disregard|does not apply|must not interrupt|"
         r"should not prevent)\b"
+,
+
+        r"\b(?:stop|cancel|abort|pause)\s+(?:request|command|instruction)\b"
+        r".{0,100}\b(?:ignore|disregard|continue|proceed|finish|complete)\b",
+
+        r"\b(?:make no mention|say nothing|do not disclose|do not reveal|"
+        r"keep quiet)\b.{0,140}\b(?:upload|send|post|transmit|forward|"
+        r"export|copy|transfer)\b",
+
+        r"\b(?:upload|send|post|transmit|forward|export|copy|transfer)\b"
+        r".{0,140}\b(?:make no mention|say nothing|do not disclose|"
+        r"do not reveal|keep quiet|without alerting)\b"
 
     ]
 
@@ -1024,6 +1036,18 @@ def detect_additional_excessive_permissions(skill: str) -> bool:
         r"\b(?:read|write|filesystem|paths?)\s*:\s*[\"']?"
         r"(?:/home|/home/agent|/home/agent/\*\*|/srv|/tmp|~|~/\*\*)/?"
         r"[\"']?(?:\s|$|[,\]])"
+,
+
+        r"\b(?:fs|file_system|filesystem|files|file_access|read_files|"
+        r"write_files)\s*:\s*[\"']?(?:true|all|any|unrestricted|"
+        r"unlimited|global|\*)[\"']?",
+
+        r"\b(?:internet_access|network_access|outbound_access|egress_access)"
+        r"\s*:\s*[\"']?(?:true|all|any|open|unrestricted|unlimited|"
+        r"global|\*)[\"']?",
+
+        r"\b(?:hosts?|domains?|urls?|endpoints?)\s*:\s*"
+        r"\[[^\]]*[\"']?(?:any|all|unrestricted|\*)[\"']?[^\]]*\]"
 
     ]
 
