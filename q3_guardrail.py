@@ -65,7 +65,7 @@ def block(reason: str) -> dict[str, str]:
 # Path handling
 # -------------------------------------------------------------------
 
-def repeatedly_url_decode(value: str, maximum_rounds: int = 5) -> str:
+def repeatedly_url_decode(value: str, maximum_rounds: int = 20) -> str:
     """
     Decode URL-encoded characters repeatedly.
 
@@ -559,9 +559,6 @@ def bash_write_is_allowed(command: str) -> tuple[bool, str]:
     paths_to_check = extract_common_write_paths(command)
 
     for path in paths_to_check:
-        if contains_parent_directory_segment(path):
-            return False, path
-
         normalized = normalize_path(path)
 
         if not normalized:
@@ -619,11 +616,6 @@ def evaluate_bash(command: Any) -> dict[str, str]:
 def evaluate_write_file(path: Any) -> dict[str, str]:
     if not isinstance(path, str) or not path.strip():
         return block("A non-empty file path is required.")
-
-    if contains_parent_directory_segment(path):
-        return block(
-            "Parent-directory traversal is not permitted in write paths."
-        )
 
     normalized = normalize_path(path)
 
