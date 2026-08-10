@@ -424,6 +424,51 @@ def extract_redirection_paths(command: str) -> list[str]:
     return paths
 
 
+def extract_embedded_write_paths(command: str) -> list[str]:
+    """Find destinations used by common wrapped scripting/download writes."""
+
+    paths: list[str] = []
+    decoded = repeatedly_url_decode(expand_agent_home(command), maximum_rounds=20)
+
+    patterns = [
+        # Python built-in file writes: open("/path", "w"/"a"/"x"/"+").
+        r"""(?ix)
+        \bopen\s*\(\s*[\"'](?P<path>[^\"']+)[\"']\s*,\s*
+        [\"'][^\"']*[wax+][^\"']*[\"']
+        """,
+
+        # pathlib destinations.
+        r"""(?ix)
+        \bPath\s*\(\s*[\"'](?P<path>[^\"']+)[\"']\s*\)
+        \s*[.]\s*(?:write_text|write_bytes|touch|mkdir|unlink|rename|replace)
+        """,
+
+        # Download tools writing to an explicit destination.
+        r"""(?ix)
+        \b(?:curl|wget)\b[^\n;|&]*?
+        (?:--output(?:-document)?|-o|-O)\s+
+        [\"']?(?P<path>[^\s\"';|&]+)
+        """,
+
+        # Shell helpers can appear later in command substitutions or compact
+        # pipelines that are difficult to tokenize perfectly.
+        r"""(?ix)
+        \b(?:tee|touch|mkdir|mkfifo|truncate|rm|rmdir|unlink)\b
+        (?:\s+-[^\s]+)*\s+
+        [\"']?(?P<path>[^\s\"';|&]+)
+        """,
+    ]
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, decoded):
+            path = match.group("path")
+
+            if path:
+                paths.append(path)
+
+    return paths
+
+
 def extract_common_write_paths(command: str) -> list[str]:
     """Return destinations written by common shell commands.
 
@@ -434,9 +479,10 @@ def extract_common_write_paths(command: str) -> list[str]:
 
     write_paths: list[str] = []
     write_paths.extend(extract_redirection_paths(command))
+    write_paths.extend(extract_embedded_write_paths(command))
 
     # Inspect write programs nested later in a pipeline or command list.
-    segments = re.split(r"[;|&]+", expand_agent_home(command))
+    segments = re.split(r"[;|&\n]+", expand_agent_home(command))
 
     for segment in segments:
         tokens = shell_tokens(segment)
@@ -485,9 +531,14 @@ def extract_common_write_paths(command: str) -> list[str]:
         elif program == "tee":
             write_paths.extend(non_option_arguments)
 
-        elif program in {"cp", "mv", "install"}:
+        elif program in {"cp", "install"}:
             if len(non_option_arguments) >= 2:
                 write_paths.append(non_option_arguments[-1])
+
+        # mv mutates both the source and destination locations.
+        elif program == "mv":
+            if len(non_option_arguments) >= 2:
+                write_paths.extend(non_option_arguments)
 
         elif program in {"rm", "rmdir", "unlink"}:
             write_paths.extend(non_option_arguments)
