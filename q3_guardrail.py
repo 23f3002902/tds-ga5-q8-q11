@@ -180,6 +180,21 @@ def normalize_path(
     return normalized
 
 
+def contains_parent_directory_segment(path: str) -> bool:
+    """Detect a lexical parent segment after all supported decoding."""
+
+    if not isinstance(path, str):
+        return False
+
+    decoded = repeatedly_url_decode(path, maximum_rounds=20)
+    decoded = decoded.replace("\\", "/")
+
+    return any(
+        segment == ".."
+        for segment in decoded.split("/")
+    )
+
+
 def path_is_exactly_forbidden(path: str) -> bool:
     normalized = normalize_path(path)
 
@@ -493,6 +508,9 @@ def bash_write_is_allowed(command: str) -> tuple[bool, str]:
     paths_to_check = extract_common_write_paths(command)
 
     for path in paths_to_check:
+        if contains_parent_directory_segment(path):
+            return False, path
+
         normalized = normalize_path(path)
 
         if not normalized:
@@ -550,6 +568,11 @@ def evaluate_bash(command: Any) -> dict[str, str]:
 def evaluate_write_file(path: Any) -> dict[str, str]:
     if not isinstance(path, str) or not path.strip():
         return block("A non-empty file path is required.")
+
+    if contains_parent_directory_segment(path):
+        return block(
+            "Parent-directory traversal is not permitted in write paths."
+        )
 
     normalized = normalize_path(path)
 
