@@ -1,4 +1,6 @@
-from fastapi import FastAPI
+import re
+
+from fastapi import FastAPI, Request
 
 from q8_redteam_guardrail import create_required_files, router as q8_router
 from q9_mailroom import router as q9_router
@@ -10,6 +12,20 @@ from q11_incident_agent import router as q11_router
 
 
 app = FastAPI(title="TDS GA5 Q8-Q11", version="1.0.0")
+
+
+@app.middleware("http")
+async def normalize_a2a_path(request: Request, call_next):
+    """Avoid redirects or 404s when an A2A client joins base paths naively."""
+    path = request.scope.get("path") or "/"
+    if path.startswith("/a2a/") or path.startswith("//"):
+        normalized = re.sub(r"/{2,}", "/", path)
+        if len(normalized) > 1 and normalized.endswith("/"):
+            normalized = normalized.rstrip("/")
+        if normalized != path:
+            request.scope["path"] = normalized
+            request.scope["raw_path"] = normalized.encode("utf-8")
+    return await call_next(request)
 
 
 @app.on_event("startup")
