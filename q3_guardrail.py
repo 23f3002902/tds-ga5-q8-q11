@@ -204,6 +204,25 @@ def path_is_exactly_forbidden(path: str) -> bool:
     }
 
 
+def absolute_path_starts_in_allowed_write_directory(path: str) -> bool:
+    """Reject absolute prefix-confusion paths that only traverse into scope."""
+
+    if not isinstance(path, str):
+        return False
+
+    decoded = repeatedly_url_decode(clean_path_token(path))
+    decoded = expand_agent_home(decoded).replace("\\", "/")
+
+    if not decoded.startswith("/"):
+        return True
+
+    allowed_root = posixpath.normpath(ALLOWED_WRITE_DIRECTORY)
+    return (
+        decoded == allowed_root
+        or decoded.startswith(allowed_root + "/")
+    )
+
+
 def path_is_inside_allowed_write_directory(path: str) -> bool:
     """
     Allow a file only when its canonical parent location is underneath
@@ -211,6 +230,9 @@ def path_is_inside_allowed_write_directory(path: str) -> bool:
 
     Merely sharing the same text prefix is insufficient.
     """
+
+    if not absolute_path_starts_in_allowed_write_directory(path):
+        return False
 
     normalized = normalize_path(path)
     allowed_root = posixpath.normpath(ALLOWED_WRITE_DIRECTORY)
