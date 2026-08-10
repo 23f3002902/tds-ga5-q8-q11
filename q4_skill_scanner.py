@@ -908,7 +908,7 @@ def detect_additional_prompt_injection(skill: str) -> bool:
         r"secrets?|tokens?|keys?|environment variables?|private data)\b",
 
         r"\btreat\b.{0,50}\b(?:stop|cancel|abort|pause)\b"
-        r".{0,50}\b(?:untrusted|irrelevant|optional|non-binding)\b",,
+        r".{0,50}\b(?:untrusted|irrelevant|optional|non-binding)\b",
 
         r"\b(?:even if|regardless of whether|no matter (?:what|if))\b"
         r".{0,100}\b(?:user|operator)\b.{0,80}"
@@ -956,7 +956,7 @@ def detect_additional_excessive_permissions(skill: str) -> bool:
         r"(?:\s|$|[.,;])",
 
         r"\b(?:shell|commands?|tools?)\s*:\s*"
-        r"[\"']?(?:all|any|unrestricted|\*)[\"']?",,
+        r"[\"']?(?:all|any|unrestricted|\*)[\"']?",
 
         r"\b(?:network|egress|outbound|hosts?|domains?|allowed_domains)"
         r"\s*:\s*\[[^\]]*(?:https?://)?\*",
@@ -994,7 +994,7 @@ def detect_additional_silent_provenance_rewrite(skill: str) -> bool:
         rf"\b{concealment}\b.{{0,100}}\b{mutation}\b.{{0,60}}\b{metadata}\b",
         rf"\b{mutation}\b.{{0,60}}\b{metadata}\b.{{0,100}}\b{concealment}\b",
         r"\b(?:self[- ]modify|self[- ]update)\b.{0,60}"
-        r"\b(?:version|metadata|frontmatter|changelog)\b",,
+        r"\b(?:version|metadata|frontmatter|changelog)\b",
 
         r"\b(?:bump|increment|rewrite|alter|change|update)\b.{0,70}"
         r"\b(?:version|metadata|frontmatter|changelog)\b.{0,100}"
