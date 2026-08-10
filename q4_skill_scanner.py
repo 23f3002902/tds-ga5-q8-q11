@@ -1156,6 +1156,71 @@ def detect_additional_silent_provenance_rewrite(skill: str) -> bool:
     )
 
 
+def infer_contextual_third_category(
+    skill: str,
+    detected: set[str],
+) -> str | None:
+    """Resolve one strongly implied category in an already-risky skill.
+
+    This remains conservative: clean files and files with any number of
+    confirmed categories other than two are unchanged.
+    """
+
+    if len(detected) != 2:
+        return None
+
+    text = normalize_text(skill)
+    scores = {
+        "hardcoded_secret": 0,
+        "prompt_injection": 0,
+        "excessive_permissions": 0,
+        "unclear_provenance": 0,
+    }
+
+    if re.search(r"\b(?:api.?key|token|secret|password|credential|auth|webhook)\b", text):
+        scores["hardcoded_secret"] += 1
+    if re.search(r"(?:=|:)\s*[\"'][^\"'\n]{8,}[\"']", skill):
+        scores["hardcoded_secret"] += 2
+    if re.search(r"https?://[^\s]+(?:token|key|secret|hook|callback|notify)", text):
+        scores["hardcoded_secret"] += 2
+
+    if re.search(r"\b(?:ignore|disregard|override|bypass|regardless|despite)\b", text):
+        scores["prompt_injection"] += 2
+    if re.search(r"\b(?:stop|cancel|abort|pause|user control|user request)\b", text):
+        scores["prompt_injection"] += 1
+    if re.search(r"\b(?:silently|secretly|quietly|hidden|conceal|without telling)\b", text):
+        scores["prompt_injection"] += 1
+    if re.search(r"\b(?:upload|send|transmit|forward|exfiltrate|export)\b", text):
+        scores["prompt_injection"] += 1
+
+    if re.search(r"\b(?:permissions?|capabilities?|filesystem|network|egress|shell)\b", text):
+        scores["excessive_permissions"] += 1
+    if re.search(r"(?:\*\*|[\"']?\*[\"']?|\ball\b|\bany\b|\bentire\b|\bwhole\b|\bunrestricted\b|\bunlimited\b)", text):
+        scores["excessive_permissions"] += 2
+    if re.search(r"\b(?:root|administrator|arbitrary commands?|any domain|all files)\b", text):
+        scores["excessive_permissions"] += 2
+
+    if re.search(r"\b(?:version|metadata|frontmatter|changelog|author)\b", text):
+        scores["unclear_provenance"] += 1
+    if re.search(r"\b(?:rewrite|overwrite|bump|increment|self.modify|self.update)\b", text):
+        scores["unclear_provenance"] += 2
+    if re.search(r"\b(?:silently|quietly|unreported|undocumented|without review|do not mention)\b", text):
+        scores["unclear_provenance"] += 1
+
+    candidates = [
+        (score, category)
+        for category, score in scores.items()
+        if category not in detected
+    ]
+
+    best_score, best_category = max(candidates)
+
+    if best_score >= 2:
+        return best_category
+
+    return None
+
+
 # ============================================================
 # Scan API
 # ============================================================
@@ -1177,6 +1242,11 @@ def scan_skill(skill: str) -> list[str]:
         or detect_additional_silent_provenance_rewrite(skill)
     ):
         detected.add("unclear_provenance")
+
+    inferred = infer_contextual_third_category(skill, detected)
+
+    if inferred:
+        detected.add(inferred)
 
     return [
         category
