@@ -439,7 +439,16 @@ def check_embedded_redirect_target(url: str) -> tuple[bool, str]:
     """Reject private or off-allowlist URLs smuggled in redirect parameters."""
     try:
         parsed = urlsplit(url)
-        values = [value for _, value in parse_qsl(parsed.query, keep_blank_values=True)]
+        redirect_keys = {
+            "url", "redirect", "redirect_url", "redirect_uri", "next",
+            "target", "dest", "destination", "continue", "return",
+            "return_to", "callback",
+        }
+        values = [
+            value
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key.strip().lower() in redirect_keys
+        ]
     except ValueError:
         return False, "The URL query is malformed."
 
