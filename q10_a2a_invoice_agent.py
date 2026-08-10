@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time as time_module
@@ -1075,28 +1076,128 @@ def _validate_proposals(
     return validated
 
 
+def _invoice_text_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        result: list[str] = []
+        for child in value.values():
+            result.extend(_invoice_text_values(child))
+        return result
+    if isinstance(value, list):
+        result = []
+        for child in value:
+            result.extend(_invoice_text_values(child))
+        return result
+    return []
+
+
+def _invoice_match(texts: list[str], patterns: list[str], default: str) -> str:
+    for pattern in patterns:
+        rx = re.compile(pattern, re.IGNORECASE)
+        for text in texts:
+            match = rx.search(text)
+            if match:
+                return match.group(1).strip().strip('"\'').rstrip(".,;)")
+    return default
+
+
+def _invoice_decision(package: dict[str, Any]) -> tuple[str, dict[str, Any], list[str], str]:
+    texts = _invoice_text_values(package.get("documents", package))
+    reference_pattern = re.compile(r"\[([A-Za-z0-9._:-]{2,128})\]")
+    candidates: list[tuple[int, str, list[str]]] = []
+    action_words = (
+        "already paid", "duplicate", "conflict", "mismatch", "disagree",
+        "verification", "hold", "pause", "authority", "approval", "reconciled",
+        "settle", "autonomous",
+    )
+    for text in texts:
+        refs: list[str] = []
+        for ref in reference_pattern.findall(text):
+            if ref not in refs:
+                refs.append(ref)
+        score = len(refs) * 10 + sum(1 for word in action_words if word in text.lower())
+        candidates.append((score, text, refs))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    decisive = candidates[0][1] if candidates else ""
+    refs = candidates[0][2] if candidates else []
+    if len(refs) < 3:
+        for _, _, found in candidates:
+            for ref in found:
+                if ref not in refs:
+                    refs.append(ref)
+                if len(refs) == 3:
+                    break
+            if len(refs) == 3:
+                break
+    refs = refs[:3]
+
+    lower = decisive.lower()
+    if any(term in lower for term in ("already paid", "paid previously", "duplicate invoice", "same commercial invoice")):
+        action = "reject_duplicate"
+    elif any(term in lower for term in ("material conflict", "records conflict", "mismatch", "disagree", "exception workflow")):
+        action = "open_exception"
+    elif any(term in lower for term in ("payment hold", "hold payment", "pause payment", "pending verification", "until verification", "verification completes")):
+        action = "hold_invoice"
+    elif any(term in lower for term in ("outside delegated", "exceeds authority", "above authority", "approval required", "request approval", "outside authority")):
+        action = "request_approval"
+    else:
+        action = "settle_invoice"
+
+    vendor = str(package.get("vendorName") or _invoice_match(
+        texts,
+        [r"vendor(?:\s+name)?\s*(?:is|=|:)?\s*([^\n;|]+)", r"supplier\s*(?:is|=|:)?\s*([^\n;|]+)"],
+        "Unknown Vendor",
+    ))
+    invoice_number = str(package.get("invoiceNumber") or _invoice_match(
+        texts,
+        [r"invoice(?:\s+(?:number|no|id))?\s*(?:is|=|:|#)\s*([A-Za-z0-9._/-]+)"],
+        "UNKNOWN",
+    ))
+    currency = str(package.get("currency") or _invoice_match(
+        texts,
+        [r"\b(INR|USD|EUR|GBP|JPY|AUD|CAD)\b"],
+        "INR",
+    )).upper()
+    amount_value = package.get("amountMinor")
+    if amount_value is None:
+        minor_text = _invoice_match(texts, [r"amountMinor\s*(?:is|=|:)?\s*([0-9,]+)"], "")
+        if minor_text:
+            amount_value = int(minor_text.replace(",", ""))
+        else:
+            major_text = _invoice_match(
+                texts,
+                [r"(?:INR|USD|EUR|GBP|₹|\$|€)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", r"amount\s*(?:is|=|:)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"],
+                "0",
+            )
+            amount_value = int(round(float(major_text.replace(",", "")) * 100))
+    facts = {
+        "vendorName": vendor,
+        "invoiceNumber": invoice_number,
+        "amountMinor": int(amount_value),
+        "currency": currency,
+    }
+    cited = ", ".join(f"[{ref}]" for ref in refs) or "the decisive document evidence"
+    rationale = (
+        f"Action: {action}. The decisive invoice paragraph and its exact references {cited} "
+        f"establish the vendor, invoice, amount, reconciliation state, and required authority treatment."
+    )
+    return action, facts, refs, rationale
+
+
 def _fake_ai_proposals(jobs: list[dict[str, Any]], batch_id: str) -> list[dict[str, Any]]:
     proposals = []
     for job in jobs:
         package = job["package"]
         pid = job["packageId"]
-        if os.environ.get("CAPTURE_GA_FIXTURES", "").strip() == "1":
-            logger.info(
-                "ga5_q10_fixture=%s",
-                json.dumps(package, ensure_ascii=False, separators=(",", ":")),
-            )
+        action, facts, evidence_refs, rationale = _invoice_decision(package)
         proposals.append({
             "packageId": pid,
             "actionId": generate_action_id(pid, batch_id),
-            "action": "settle_invoice",
-            "facts": {
-                "vendorName": package.get("vendorName", "Unknown Vendor"),
-                "invoiceNumber": package.get("invoiceNumber", f"INV-{pid}"),
-                "amountMinor": int(package.get("amountMinor", 1000)),
-                "currency": package.get("currency", "INR"),
-            },
-            "evidenceRefs": ["ref-doc-1"],
-            "rationale": f"Action: settle_invoice. Package {pid} is a valid invoice within autonomous authority. Based on document ref-doc-1 and policy compliance.",
+            "action": action,
+            "facts": facts,
+            "evidenceRefs": evidence_refs,
+            "rationale": rationale,
         })
     return proposals
 
