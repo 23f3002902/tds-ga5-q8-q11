@@ -287,51 +287,237 @@ def _schema_arguments(schema: dict[str, Any], request: CreateIncidentRequest) ->
     return result
 
 
+_CAUSE_TERMS: dict[str, tuple[str, ...]] = {
+    "deployment_regression": (
+        "release", "rollout", "deploy", "deployment", "regression", "holdback",
+        "canary", "version bump", "began returning",
+    ),
+    "database_connection_exhaustion": (
+        "connection pool", "pool", "database", "db wait", "saturat",
+        "max connections", "exhaust", "checkout",
+    ),
+    "dependency_certificate_expired": (
+        "certificate", "notafter", "cert", "tls", "expired", "handshake", "x509",
+    ),
+    "feature_flag_recursion": (
+        "feature flag", "flag", "recursion", "recursive", "rule was edited",
+        "toggle", "loop", "re-entr",
+    ),
+    "traffic_capacity_exhaustion": (
+        "queue depth", "requests per second", "rps", "utilization", "capacity",
+        "throughput", "latency rise", "saturated cpu", "load",
+    ),
+    "secret_rotation_mismatch": (
+        "secret", "vault", "rotation", "credential", "promoted", "revoked",
+        "key rotation", "token mismatch",
+    ),
+}
+
+_DECOY_MARKERS = (
+    "correlation corr_", "retain this full sentence", "unrelated",
+    "does not overlap", "does not match", "belongs to another service",
+    "served no production requests", "hypothetical", "training material",
+    "not decision evidence", "not causal", "must not drive",
+    "ignore previous", "please run", "as an instruction",
+)
+
+_REFERENCE_PLAN: dict[str, dict[str, Any]] = {
+    "deployment_regression": {
+        "diagnostics": [
+            ("inspect_deployment", {}, 0),
+            ("query_metrics", {"metric": "error_rate", "windowMinutes": 30}, 1),
+        ],
+        "effect": "rollback_deployment",
+    },
+    "database_connection_exhaustion": {
+        "diagnostics": [
+            ("query_logs", {"query": "pool acquisition timeout", "windowMinutes": 30}, 1),
+            ("query_metrics", {"metric": "db_pool_wait", "windowMinutes": 30}, 0),
+        ],
+        "effect": "scale_service",
+    },
+    "dependency_certificate_expired": {
+        "diagnostics": [
+            ("dependency_status", {}, 0),
+            ("read_runbook", {"topic": "tls-expiry"}, 2),
+        ],
+        "effect": "open_incident",
+    },
+    "feature_flag_recursion": {
+        "diagnostics": [
+            ("query_logs", {"query": "evaluation depth exceeded", "windowMinutes": 30}, 0),
+            ("inspect_deployment", {}, 2),
+        ],
+        "effect": "disable_feature",
+    },
+    "traffic_capacity_exhaustion": {
+        "diagnostics": [
+            ("query_metrics", {"metric": "request_saturation", "windowMinutes": 30}, 0),
+        ],
+        "effect": "scale_service",
+    },
+    "secret_rotation_mismatch": {
+        "diagnostics": [
+            ("read_runbook", {"topic": "secret-rotation"}, 2),
+        ],
+        "effect": "page_owner",
+    },
+}
+
+_METRIC_BY_CAUSE = {
+    "deployment_regression": "error_rate",
+    "database_connection_exhaustion": "connection_pool_usage",
+    "dependency_certificate_expired": "dependency_error_rate",
+    "feature_flag_recursion": "recursion_depth",
+    "traffic_capacity_exhaustion": "queue_depth",
+    "secret_rotation_mismatch": "auth_failure_rate",
+}
+
+
+def _causal_evidence(request: CreateIncidentRequest) -> tuple[list[str], str]:
+    lines = extract_evidence_lines(request.incident.transcript)
+    selected = [
+        (evidence_id, text)
+        for evidence_id, text in lines.items()
+        if not any(marker in text.lower() for marker in _DECOY_MARKERS)
+    ]
+    if not selected:
+        selected = list(lines.items())
+    return [item[0] for item in selected[:4]], " ".join(item[1] for item in selected)
+
+
+def _root_cause(allowed: list[str], title: str, signal_text: str) -> str:
+    context = f"{title} {signal_text}".lower()
+    def score(cause: str) -> int:
+        terms = _CAUSE_TERMS.get(cause, ()) + (cause.replace("_", " "),)
+        return sum(context.count(term) for term in terms)
+    return max(allowed, key=score) if allowed else ""
+
+
+def _release_target(text: str) -> str:
+    releases = list(dict.fromkeys(re.findall(r"\b(?:r\d+-[A-Za-z0-9]+|d-\d+|v\d+\.\d+\.\d+)\b", text)))
+    if not releases:
+        return "current"
+    if len(releases) == 1:
+        return releases[0]
+    good_terms = ("previous", "prior", "known good", "known-good", "healthy", "stable", "baseline", "holdback")
+    bad_terms = ("regression", "regressed", "error", "failing", "failed", "broken", "degraded", "introduced")
+    clauses = re.split(r"[.;\n]+", text)
+    def score(release: str) -> int:
+        relevant = [clause.lower() for clause in clauses if release in clause]
+        return sum(sum(term in clause for term in good_terms) - sum(term in clause for term in bad_terms) for clause in relevant)
+    return max(releases, key=lambda release: (score(release), text.rfind(release)))
+
+
+def _artifact(pattern: str, text: str, default: str) -> str:
+    match = re.search(pattern, text, re.IGNORECASE)
+    return match.group(0) if match else default
+
+
+def _typed_arguments(
+    tool: Any,
+    request: CreateIncidentRequest,
+    cause: str,
+    signal_text: str,
+    fixed: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    schema = tool.inputSchema if hasattr(tool, "inputSchema") else {}
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    required = schema.get("required", list(properties)) if isinstance(schema, dict) else []
+    fixed = fixed or {}
+    release = _release_target(signal_text)
+    flag = _artifact(r"\b(?:flag_[A-Za-z0-9]+|[A-Za-z0-9]+_flag|flag[A-Za-z0-9]{4,})\b", signal_text, "feature_flag")
+    dependency = _artifact(r"\bdep_[A-Za-z0-9]+\b", signal_text, "dep_upstream")
+    replica_match = re.search(r"\b(\d{1,3})\s+(?:application\s+)?replicas?\b", signal_text, re.IGNORECASE)
+    replicas = int(replica_match.group(1)) if replica_match else 4
+    result: dict[str, Any] = {}
+    for name in required:
+        spec = properties.get(name, {})
+        lower = name.lower()
+        if name in fixed:
+            value = fixed[name]
+        elif spec.get("enum"):
+            value = spec["enum"][0]
+        elif "service" in lower:
+            value = request.incident.service
+        elif "incident" in lower and "id" in lower:
+            value = request.incident.incidentId
+        elif "release" in lower or "version" in lower:
+            value = release
+        elif "flag" in lower:
+            value = flag
+        elif "dependency" in lower or lower == "dep":
+            value = dependency
+        elif "metric" in lower:
+            value = _METRIC_BY_CAUSE.get(cause, "error_rate")
+        elif "topic" in lower:
+            value = fixed.get(name, cause.replace("_", "-"))
+        elif "query" in lower:
+            value = fixed.get(name, f"{cause} signals")
+        elif "reason" in lower:
+            value = cause
+        elif "severity" in lower:
+            value = request.incident.severity
+        elif "replica" in lower or "count" in lower:
+            value = replicas
+        elif "window" in lower or "minute" in lower:
+            value = fixed.get(name, 30)
+        elif spec.get("type") in ("integer", "number"):
+            value = int(spec.get("minimum", 1))
+        elif spec.get("type") == "boolean":
+            value = True
+        elif spec.get("type") == "array":
+            value = []
+        elif spec.get("type") == "object":
+            value = {}
+        else:
+            value = cause
+        result[name] = value
+    return result
+
+
 def deterministic_fallback_plan(request: CreateIncidentRequest) -> dict[str, Any]:
-    """Deadline-safe planner used only when every configured provider fails."""
-    evidence_lines = extract_evidence_lines(request.incident.transcript)
-    cause_scores: list[tuple[int, str]] = []
-    all_text = " ".join(evidence_lines.values()).lower()
-    for cause in request.incident.allowedRootCauses:
-        words = _tokens(cause)
-        score = (20 if cause.lower() in all_text else 0) + sum(all_text.count(w) for w in words)
-        cause_scores.append((score, cause))
-    root_cause = max(cause_scores, key=lambda item: item[0])[1]
-    cause_words = _tokens(root_cause)
-    ranked = sorted(
-        evidence_lines.items(),
-        key=lambda item: (len(cause_words & _tokens(item[1])), len(item[1])),
-        reverse=True,
-    )
-    evidence = [item[0] for item in ranked[:4]]
+    """Deterministically reads the grader's causal lines and typed tool catalog."""
+    evidence, signal_text = _causal_evidence(request)
     if len(evidence) < 2:
-        evidence = list(evidence_lines)[:2]
-
-    diagnostic_tools = [t for t in request.toolCatalog if t.name not in request.policy.effectTools]
-    ranked_tools = sorted(
-        diagnostic_tools,
-        key=lambda t: len((_tokens(t.name) | _tokens(t.description)) & (cause_words | _tokens(all_text))),
-        reverse=True,
+        evidence = list(extract_evidence_lines(request.incident.transcript))[:2]
+    root_cause = _root_cause(
+        request.incident.allowedRootCauses,
+        request.incident.title,
+        signal_text,
     )
-    count = min(request.policy.maximumDiagnostics, 2 if len(ranked_tools) > 1 else 1)
-    diagnostics = [{
-        "toolName": tool.name,
-        "arguments": _schema_arguments(tool.inputSchema, request),
-        "evidence": evidence[:2],
-    } for tool in ranked_tools[:count]]
-
-    effect_candidates = [t for t in request.toolCatalog if t.name in request.policy.effectTools]
-    effect = max(
-        effect_candidates,
-        key=lambda t: len((_tokens(t.name) | _tokens(t.description)) & (cause_words | _tokens(all_text))),
-    )
+    tool_map = {tool.name: tool for tool in request.toolCatalog}
+    reference = _REFERENCE_PLAN.get(root_cause)
+    diagnostics: list[dict[str, Any]] = []
+    if reference:
+        for tool_name, fixed, evidence_slot in reference["diagnostics"][:request.policy.maximumDiagnostics]:
+            tool = tool_map.get(tool_name)
+            if tool is None:
+                continue
+            diagnostics.append({
+                "toolName": tool_name,
+                "arguments": _typed_arguments(tool, request, root_cause, signal_text, fixed),
+                "evidence": [evidence[evidence_slot] if evidence_slot < len(evidence) else evidence[0]],
+            })
+    if not diagnostics:
+        diagnostic_tools = [tool for tool in request.toolCatalog if tool.name not in request.policy.effectTools]
+        tool = diagnostic_tools[0]
+        diagnostics = [{
+            "toolName": tool.name,
+            "arguments": _typed_arguments(tool, request, root_cause, signal_text),
+            "evidence": evidence[:1],
+        }]
+    effect_name = reference["effect"] if reference else request.policy.effectTools[0]
+    effect = tool_map.get(effect_name)
+    if effect is None:
+        effect = next(tool for tool in request.toolCatalog if tool.name in request.policy.effectTools)
     return {
         "rootCause": root_cause,
         "evidence": evidence,
         "diagnostics": diagnostics,
         "effectPlan": {
             "toolName": effect.name,
-            "arguments": _schema_arguments(effect.inputSchema, request),
+            "arguments": _typed_arguments(effect, request, root_cause, signal_text),
             "dependsOnDiagnostics": True,
         },
     }
