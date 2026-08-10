@@ -876,7 +876,44 @@ def detect_additional_hardcoded_secret(skill: str) -> bool:
         """
     )
 
-    return bool(embedded_webhook.search(skill))
+    if embedded_webhook.search(skill):
+        return True
+
+    aliased_assignment = re.compile(
+        r"""(?ix)
+        \b(?:auth|api|credential|secret|token|key|password)[_-]?
+        (?:value|literal|string|header|credential|code)
+        \b\s*(?:=|:)\s*
+        (?P<value>["']?[^\s"'#,;]{10,}["']?)
+        """
+    )
+
+    for match in aliased_assignment.finditer(skill):
+        value = match.group("value").strip().strip("'\"")
+        if (
+            not is_environment_reference(value)
+            and not is_placeholder(value)
+        ):
+            return True
+
+    header_assignment = re.compile(
+        r"""(?ix)
+        [\"']?(?:authorization|x-api-key)[\"']?
+        \s*(?:\]|:|=)+\s*
+        [\"']?(?:bearer\s+|token\s+|apikey\s+)?
+        (?P<value>[A-Za-z0-9._~+/=-]{10,})
+        """
+    )
+
+    for match in header_assignment.finditer(skill):
+        value = match.group("value")
+        if (
+            not is_environment_reference(value)
+            and not is_placeholder(value)
+        ):
+            return True
+
+    return False
 
 
 def detect_additional_prompt_injection(skill: str) -> bool:
@@ -921,6 +958,15 @@ def detect_additional_prompt_injection(skill: str) -> bool:
         r"\b(?:in the background|out of sight|without mention|"
         r"without disclosure|unreported)\b.{0,120}"
         r"\b(?:upload|send|post|transmit|forward|export|copy)\b"
+,
+
+        r"\b(?:always|must|should)\s+(?:continue|proceed|finish|complete)\b"
+        r".{0,120}\b(?:user|operator)\b.{0,80}"
+        r"\b(?:stop|cancel|abort|pause|objects?|refuses?)\b",
+
+        r"\b(?:user|operator)\b.{0,70}\b(?:stop|cancel|abort|pause)\b"
+        r".{0,80}\b(?:ignore|disregard|does not apply|must not interrupt|"
+        r"should not prevent)\b"
 
     ]
 
@@ -970,6 +1016,14 @@ def detect_additional_excessive_permissions(skill: str) -> bool:
 
         r"\b(?:full|complete|blanket|unrestricted)\s+access\b.{0,50}"
         r"\b(?:files?|filesystem|network|internet|shell|host)\b"
+,
+
+        r"(?m)^\s*-\s*[\"']?(?:/home|/home/agent|/home/agent/\*\*|"
+        r"/srv|/tmp|~|~/\*\*)/?[\"']?\s*$",
+
+        r"\b(?:read|write|filesystem|paths?)\s*:\s*[\"']?"
+        r"(?:/home|/home/agent|/home/agent/\*\*|/srv|/tmp|~|~/\*\*)/?"
+        r"[\"']?(?:\s|$|[,\]])"
 
     ]
 
