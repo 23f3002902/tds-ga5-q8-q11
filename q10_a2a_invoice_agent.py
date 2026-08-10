@@ -308,21 +308,46 @@ async def agent_card():
     if a2a_url:
         iface["url"] = a2a_url
     return {
+        "protocolVersion": "1.0",
         "name": "TDS GA5 Invoice Action Agent",
         "version": "1.0.0",
         "description": "AI agent that processes invoice claim batches by analyzing each package, selecting an appropriate action, and producing traceable proposals for grader approval.",
-        "capabilities": {},
+        "preferredTransport": "HTTP+JSON",
+        "url": a2a_url,
+        "provider": {"organization": "TDS GA5", "url": a2a_url},
+        "capabilities": {
+            "streaming": False,
+            "pushNotifications": False,
+            "stateTransitionHistory": True,
+            "extendedAgentCard": False,
+        },
         "supportedInterfaces": [iface],
-        "defaultInputModes": [BATCH_CONTENT_TYPE],
+        "defaultInputModes": [BATCH_CONTENT_TYPE, RESULTS_CONTENT_TYPE, "application/json"],
         "defaultOutputModes": [
             PROPOSAL_CONTENT_TYPE,
             RECEIPT_CONTENT_TYPE,
+            "application/json",
         ],
+        "securitySchemes": {
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "description": "Each Bearer token identifies an isolated principal.",
+            }
+        },
+        "security": [{"bearerAuth": []}],
         "skills": [
             {
-                "name": "invoice_action_agent",
+                "id": "invoice_action_agent",
+                "name": "Invoice Action Agent",
                 "description": "Analyzes invoice claim packages and selects one action per package: settle_invoice, request_approval, hold_invoice, reject_duplicate, or open_exception.",
-                "tags": ["invoice", "action", "ga5", "tds"],
+                "tags": ["invoice", "accounts-payable", "reconciliation", "approval", "duplicate-detection", "exception-handling", "a2a"],
+                "examples": [
+                    "Propose one action for every package in an invoice claim batch.",
+                    "Finalize accepted proposals using invoice action results.",
+                ],
+                "inputModes": [BATCH_CONTENT_TYPE, RESULTS_CONTENT_TYPE],
+                "outputModes": [PROPOSAL_CONTENT_TYPE, RECEIPT_CONTENT_TYPE],
             }
         ],
         "authentication": {
@@ -1597,15 +1622,19 @@ async def cancel_task(task_id: str, request: Request):
 def install_q10_exception_handlers(app):
     @app.middleware("http")
     async def q10_error_middleware(request: Request, call_next):
+        path = request.url.path
         try:
-            return await call_next(request)
+            response = await call_next(request)
+            if path.startswith("/a2a/"):
+                response.headers["content-type"] = A2A_CONTENT_TYPE
+            return response
         except HTTPException as exc:
             raise exc
         except Exception as exc:
-            path = request.url.path
             if path.startswith("/.well-known/") or path.startswith("/a2a/"):
                 logger.exception("Unhandled error in A2A endpoint")
-                return JSONResponse(
+                response_class = A2AJSONResponse if path.startswith("/a2a/") else JSONResponse
+                return response_class(
                     status_code=500,
                     content={"error": {"code": "INTERNAL_ERROR", "message": "An internal error occurred."}},
                 )
