@@ -379,15 +379,17 @@ def _update_client_span(
             and attrs.get("ga5.attempt") == attempt
             and span.get("kind") == 3
         ):
-            span["attributes"].extend(
-                otlp_attributes({
-                    "ga5.receipt.id": receipt_id,
-                    "ga5.receipt.nonce": outcome.nonce or "",
-                    "http.request.method": "POST",
-                    "http.request.resend_count": attempt - 1,
-                    "http.response.status_code": outcome.status,
-                })
-            )
+            observed = {
+                "ga5.receipt.id": receipt_id,
+                "ga5.receipt.nonce": outcome.nonce or "",
+                "http.request.method": "POST",
+                "http.request.resend_count": attempt - 1,
+            }
+            # A timeout has no HTTP response. Status 0 belongs in receiptLog,
+            # while OTLP represents the transport failure with error.type.
+            if not (outcome.status == 0 or outcome.errorType == "timeout"):
+                observed["http.response.status_code"] = outcome.status
+            span["attributes"].extend(otlp_attributes(observed))
             if outcome.status == 503 or (outcome.status == 0 and outcome.errorType == "timeout"):
                 span["status"] = {"code": 2}
                 if outcome.status == 503:
@@ -503,6 +505,12 @@ def _handle_diagnostic_failure(state: dict, action_id: str, reason: str) -> dict
     # failure reason is already represented by the authoritative receipt and
     # the ERROR client span.
     state["suppressed"] = [effect_tool]
+    execute_id = _get_execute_span_id(state, action_id)
+    for span in state.get("spans", []):
+        if span.get("spanId") == execute_id:
+            span["status"] = {"code": 2}
+            update_span_end_time(span)
+            break
     state["stage"] = "failed"
     state["currentResponse"] = _build_failed_response(state)
     return state
