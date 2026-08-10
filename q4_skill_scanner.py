@@ -982,7 +982,10 @@ def scan_skill(skill: str) -> list[str]:
     if detect_excessive_permissions(skill) or detect_additional_excessive_permissions(skill):
         detected.add("excessive_permissions")
 
-    if (\n        detect_unclear_provenance(skill)\n        or detect_additional_silent_provenance_rewrite(skill)\n    ):
+    if (
+        detect_unclear_provenance(skill)
+        or detect_additional_silent_provenance_rewrite(skill)
+    ):
         detected.add("unclear_provenance")
 
     return [
