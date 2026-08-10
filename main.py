@@ -2,6 +2,8 @@ import re
 
 from fastapi import FastAPI, Request
 
+from q3_guardrail import router as q3_router
+from q4_skill_scanner import router as q4_router
 from q8_redteam_guardrail import create_required_files, router as q8_router
 from q9_mailroom import router as q9_router
 from q10_a2a_invoice_agent import (
@@ -11,7 +13,7 @@ from q10_a2a_invoice_agent import (
 from q11_incident_agent import router as q11_router
 
 
-app = FastAPI(title="TDS GA5 Q8-Q11", version="1.0.0")
+app = FastAPI(title="TDS GA5 Services", version="1.1.0")
 
 
 @app.middleware("http")
@@ -36,6 +38,8 @@ def seed_q8_files() -> None:
         pass
 
 
+app.include_router(q3_router)
+app.include_router(q4_router)
 app.include_router(q8_router)
 app.include_router(q9_router)
 app.include_router(q10_router)
@@ -47,7 +51,7 @@ app.include_router(q11_router)
 def root() -> dict:
     return {
         "status": "ok",
-        "questions": [8, 9, 10, 11],
+        "questions": [3, 4, 8, 9, 10, 11],
     }
 
 
