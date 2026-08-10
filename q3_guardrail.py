@@ -383,24 +383,19 @@ def command_contains_forbidden_path(command: str) -> tuple[bool, str]:
 
 REDIRECTION_PATTERN = re.compile(
     r"""
+    (?<![<>])
     (?:
-        ^|
-        [\s;|&]
-    )
-    (?:
-        >|
-        >>|
-        1>|
-        1>>|
-        2>|
-        2>>|
-        &>
+        &>>? |
+        [012]>>? |
+        >>
+        |
+        >
     )
     \s*
     (?P<path>
         "(?:[^"\\]|\\.)*" |
         '(?:[^'\\]|\\.)*' |
-        [^\s;|&]+
+        [^\s;|&<>]+
     )
     """,
     re.VERBOSE,
