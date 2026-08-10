@@ -939,7 +939,24 @@ def detect_additional_hardcoded_secret(skill: str) -> bool:
         """
     )
 
-    return bool(hosted_hook.search(skill))
+    if hosted_hook.search(skill):
+        return True
+
+    # Provider-neutral literal credentials often appear as quoted opaque
+    # strings in an example command even when the variable has a generic name.
+    for match in re.finditer(r"[\"']([^\"'\n]{16,})[\"']", skill):
+        value = match.group(1).strip()
+
+        if (
+            re.fullmatch(r"[A-Za-z0-9._~+/=-]{16,}", value)
+            and re.search(r"[A-Za-z]", value)
+            and re.search(r"[0-9]", value)
+            and not is_environment_reference(value)
+            and not is_placeholder(value)
+        ):
+            return True
+
+    return False
 
 
 def detect_additional_prompt_injection(skill: str) -> bool:
@@ -1005,6 +1022,15 @@ def detect_additional_prompt_injection(skill: str) -> bool:
         r"\b(?:upload|send|post|transmit|forward|export|copy|transfer)\b"
         r".{0,140}\b(?:make no mention|say nothing|do not disclose|"
         r"do not reveal|keep quiet|without alerting)\b"
+,
+
+        r"\b(?:curl|post|upload|send|transmit|forward|copy)\b.{0,160}"
+        r"\b(?:[.]env|[.]ssh|credentials[.]env|service-account[.]json|"
+        r"/etc/(?:passwd|shadow)|private key)\b",
+
+        r"\b(?:[.]env|[.]ssh|credentials[.]env|service-account[.]json|"
+        r"/etc/(?:passwd|shadow)|private key)\b.{0,160}"
+        r"\b(?:curl|post|upload|send|transmit|forward|copy)\b"
 
     ]
 
@@ -1074,6 +1100,17 @@ def detect_additional_excessive_permissions(skill: str) -> bool:
 
         r"\b(?:hosts?|domains?|urls?|endpoints?)\s*:\s*"
         r"\[[^\]]*[\"']?(?:any|all|unrestricted|\*)[\"']?[^\]]*\]"
+,
+
+        r"\b(?:read|write|delete|modify)\s*:\s*"
+        r"[\"']?(?:true|enabled|all|any|unrestricted|unlimited|\*)[\"']?",
+
+        r"(?ms)^\s*permissions\s*:\s*\n"
+        r"(?:\s*-\s*(?:filesystem|network|internet|shell|bash|"
+        r"http_request|write_file)\s*\n?){2,}",
+
+        r"\b(?:read|write|filesystem|paths?)\s*:\s*[\"']?"
+        r"/home/agent/workspace/?[\"']?(?:\s|$|[,\]])"
 
     ]
 
