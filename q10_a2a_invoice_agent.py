@@ -84,7 +84,12 @@ ALLOWED_ACTIONS = frozenset({
 
 _db_lock = threading.RLock()
 
-router = APIRouter()
+
+class A2AJSONResponse(JSONResponse):
+    media_type = "application/a2a+json"
+
+
+router = APIRouter(default_response_class=A2AJSONResponse)
 
 
 _memory_conn: sqlite3.Connection | None = None
@@ -295,7 +300,7 @@ def check_a2a_version_header(headers: dict[str, str]) -> None:
         )
 
 
-@router.get("/.well-known/agent-card.json")
+@router.get("/.well-known/agent-card.json", response_class=JSONResponse)
 async def agent_card():
     base_url = A2A_BASE_URL or _RENDER_BASE
     a2a_url = base_url.rstrip("/") + "/a2a/"
