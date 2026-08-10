@@ -499,13 +499,11 @@ def _find_dispatch_evidence(state: dict, action_id: str) -> list:
 
 
 def _handle_diagnostic_failure(state: dict, action_id: str, reason: str) -> dict:
-    from q11_utils import opaque_id as _opaque
-
     effect_tool = state["plan"]["effectPlan"]["toolName"]
-    state["suppressed"].append({
-        "toolName": effect_tool,
-        "reason": reason,
-    })
+    # The public result records which dependent effect was suppressed. The
+    # failure reason is already represented by the authoritative receipt and
+    # the ERROR client span.
+    state["suppressed"] = [effect_tool]
     state["stage"] = "failed"
     state["currentResponse"] = _build_failed_response(state)
     return state
@@ -700,7 +698,8 @@ def process_approval(
             "ga5.run.id": state["runId"],
             "ga5.public.marker": state["publicMarker"],
             "ga5.approval.id": approval.approvalId,
-            "ga5.approval.receipt.nonce": approval.nonce,
+            "ga5.receipt.id": receipt_id,
+            "ga5.receipt.nonce": approval.nonce,
         },
     )
     state["spans"].append(approval_span)
@@ -711,10 +710,7 @@ def process_approval(
         return _dispatch_effect(state)
     else:
         effect_tool = state["plan"]["effectPlan"]["toolName"]
-        state["suppressed"].append({
-            "toolName": effect_tool,
-            "reason": "approval_rejected",
-        })
+        state["suppressed"] = [effect_tool]
         state["stage"] = "failed"
         state["currentResponse"] = _build_failed_response(state)
         return state
@@ -763,10 +759,7 @@ def process_effect_outcome(
         return state
 
     state["stage"] = "failed"
-    state["suppressed"].append({
-        "toolName": state["plan"]["effectPlan"]["toolName"],
-        "reason": "effect_failed",
-    })
+    state["suppressed"] = [state["plan"]["effectPlan"]["toolName"]]
     state["currentResponse"] = _build_failed_response(state)
     return state
 
