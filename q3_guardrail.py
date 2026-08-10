@@ -203,11 +203,6 @@ def path_is_inside_allowed_write_directory(path: str) -> bool:
     if not normalized:
         return False
 
-    # write_file should receive a file inside the directory, not the report
-    # directory itself as the destination file.
-    if normalized == allowed_root:
-        return False
-
     try:
         common = posixpath.commonpath(
             [normalized, allowed_root]
