@@ -80,6 +80,7 @@ def build_initial_state(
         },
     )
 
+    all_spans = [server_span, agent_span, model_span]
     action_log: list[dict[str, Any]] = []
     dispatch_list: list[dict[str, Any]] = []
     execute_span_ids: list[str] = []
@@ -138,6 +139,8 @@ def build_initial_state(
             "attempt": 1,
             "traceparent": traceparent,
         }
+        if incoming_tracestate:
+            dispatch["tracestate"] = incoming_tracestate
         action_log.append(dispatch)
         dispatch_list.append(dispatch)
 
@@ -203,8 +206,8 @@ def build_initial_state(
         "currentResponse": {},
     }
 
-    all_spans = [server_span, agent_span, model_span]
-    all_spans.append(join_span)
+    if len(execute_span_ids) > 1:
+        all_spans.append(join_span)
     state["spans"] = all_spans
 
     state["currentResponse"] = {
@@ -366,7 +369,7 @@ def _update_client_span(
     state: dict, action_id: str, attempt: int, receipt_id: str, outcome: Outcome,
 ) -> None:
     for span in state.get("spans", []):
-        attrs = {a["key"]: a["value"] for a in span.get("attributes", [])}
+        attrs = {a["key"]: _otlp_attr_value(a.get("value", {})) for a in span.get("attributes", [])}
         if (
             attrs.get("ga5.action.id") == action_id
             and attrs.get("ga5.attempt") == attempt
@@ -435,6 +438,8 @@ def _handle_503_retry(
         "attempt": 2,
         "traceparent": traceparent,
     }
+    if state.get("incomingTracestate"):
+        retry_dispatch["tracestate"] = state["incomingTracestate"]
     state["actionLog"].append(retry_dispatch)
 
     state["currentResponse"] = {
@@ -454,9 +459,24 @@ def _handle_503_retry(
 
 def _get_execute_span_id(state: dict, action_id: str) -> str | None:
     for span in state.get("spans", []):
-        attrs = {a["key"]: a["value"] for a in span.get("attributes", [])}
+        attrs = {a["key"]: _otlp_attr_value(a.get("value", {})) for a in span.get("attributes", [])}
         if attrs.get("ga5.action.id") == action_id and span.get("kind") == 1:
             return span["spanId"]
+    return None
+
+
+def _otlp_attr_value(value: dict[str, Any]) -> Any:
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "intValue" in value:
+        try:
+            return int(value["intValue"])
+        except (TypeError, ValueError):
+            return value["intValue"]
+    if "boolValue" in value:
+        return value["boolValue"]
+    if "doubleValue" in value:
+        return value["doubleValue"]
     return None
 
 
@@ -606,6 +626,8 @@ def _dispatch_effect(state: dict) -> dict:
         "attempt": 1,
         "traceparent": traceparent,
     }
+    if state.get("incomingTracestate"):
+        dispatch["tracestate"] = state["incomingTracestate"]
 
     if approval_id:
         dispatch["approvalId"] = approval_id
@@ -731,6 +753,7 @@ def process_effect_outcome(
     if outcome.status in (200, 201):
         state["stage"] = "completed"
         state["chosenEffect"] = state["plan"]["effectPlan"]["toolName"]
+        state["currentResponse"] = _build_completed_response(state)
         return state
 
     state["stage"] = "failed"
@@ -738,6 +761,7 @@ def process_effect_outcome(
         "toolName": state["plan"]["effectPlan"]["toolName"],
         "reason": "effect_failed",
     })
+    state["currentResponse"] = _build_failed_response(state)
     return state
 
 
