@@ -1080,6 +1080,11 @@ def _fake_ai_proposals(jobs: list[dict[str, Any]], batch_id: str) -> list[dict[s
     for job in jobs:
         package = job["package"]
         pid = job["packageId"]
+        if os.environ.get("CAPTURE_GA_FIXTURES", "").strip() == "1":
+            logger.info(
+                "ga5_q10_fixture=%s",
+                json.dumps(package, ensure_ascii=False, separators=(",", ":")),
+            )
         proposals.append({
             "packageId": pid,
             "actionId": generate_action_id(pid, batch_id),
