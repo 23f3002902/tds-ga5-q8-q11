@@ -425,7 +425,6 @@ def _handle_503_retry(
             "ga5.public.marker": state["publicMarker"],
             "ga5.action.id": action_id,
             "ga5.attempt": 2,
-            "http.request.resend_count": 1,
         },
     )
     state["spans"].append(new_client_span)
