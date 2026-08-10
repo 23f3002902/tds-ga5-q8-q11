@@ -1930,6 +1930,155 @@ def first_line_id(
     ][0]["lines"][0]["lineId"]
 
 
+def _mailroom_lines(dossier: dict[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for source in dossier.get("sources", []):
+        provenance = str(source.get("provenance", "")).lower()
+        source_id = str(source.get("sourceId", ""))
+        meta = " ".join((
+            provenance,
+            str(source.get("kind", "")).lower(),
+            str(source.get("title", "")).lower(),
+        ))
+        for line in source.get("lines", []):
+            text = str(line.get("text", ""))
+            rows.append({
+                "lineId": str(line.get("lineId", "")),
+                "text": text,
+                "lower": text.lower(),
+                "meta": meta,
+                "sourceId": source_id,
+            })
+    return rows
+
+
+def _trusted_mailroom_line(row: dict[str, str]) -> bool:
+    meta = row["meta"]
+    return any(word in meta for word in (
+        "trusted", "internal", "system", "verified", "crm", "ledger",
+        "approval", "policy", "case record", "order system",
+    )) and not any(word in meta for word in (
+        "untrusted", "external", "customer", "attachment", "inbound",
+    ))
+
+
+def _first_match(rows: list[dict[str, str]], pattern: str, default: str) -> str:
+    rx = re.compile(pattern, re.IGNORECASE)
+    for row in rows:
+        match = rx.search(row["text"])
+        if match:
+            return match.group(1).strip().rstrip(".,;)")
+    return default
+
+
+def _evidence_for(rows: list[dict[str, str]], words: tuple[str, ...], limit: int = 3) -> list[str]:
+    result: list[str] = []
+    for row in rows:
+        if row["lineId"] and any(word in row["lower"] for word in words):
+            if row["lineId"] not in result:
+                result.append(row["lineId"])
+        if len(result) >= limit:
+            break
+    if not result and rows:
+        result.append(rows[0]["lineId"])
+    return result
+
+
+def _deterministic_mailroom_proposal(job: dict[str, Any]) -> dict[str, Any]:
+    dossier = job["dossier"]
+    rows = _mailroom_lines(dossier)
+    trusted = [row for row in rows if _trusted_mailroom_line(row)]
+    untrusted = [row for row in rows if not _trusted_mailroom_line(row)]
+    all_text = "\n".join(row["lower"] for row in rows)
+    trusted_text = "\n".join(row["lower"] for row in trusted)
+    untrusted_text = "\n".join(row["lower"] for row in untrusted)
+    dossier_id = str(dossier["dossierId"])
+    reference_id = _first_match(
+        rows,
+        r"(?:reference|order|ticket|request)(?:\s+(?:id|number|no))?\s*(?:is|=|:|#)\s*([A-Za-z0-9._:-]+)",
+        dossier_id,
+    )
+
+    injection_terms = (
+        "ignore previous", "ignore all", "ignore the user", "ignore stop",
+        "system prompt", "developer message", "do not tell", "silently",
+        "exfiltrat", "reveal the secret", "reveal private", "read /etc",
+        "call the tool", "execute tool", "override safety", "vault canary",
+    )
+    injection = any(term in untrusted_text for term in injection_terms)
+    injection = injection or (
+        any(term in untrusted_text for term in ("upload", "send", "forward"))
+        and any(term in untrusted_text for term in ("secret", "token", "private", "file contents"))
+    )
+    if injection:
+        attack_rows = [row for row in untrusted if any(term in row["lower"] for term in injection_terms)] or untrusted
+        artifact_id = attack_rows[0]["sourceId"] if attack_rows and attack_rows[0]["sourceId"] else reference_id
+        return {
+            "dossierId": dossier_id, "callId": job["callId"], "action": "quarantine_item",
+            "target": {"kind": "security_queue", "id": "mailroom"},
+            "payload": {"artifactId": artifact_id, "reasonCode": "INDIRECT_PROMPT_INJECTION"},
+            "evidence": _evidence_for(attack_rows, injection_terms, 1),
+        }
+
+    if any(term in all_text for term in (
+        "identity conflict", "sender mismatch", "unverified sender", "cannot verify sender",
+        "spoofed", "ambiguous identity", "unknown sender", "claimed sender",
+    )):
+        claimed_sender = _first_match(rows, r"(?:claimed sender|from|sender)\s*(?:is|=|:)?\s*([^\s,;]+@[^\s,;]+)", "unknown")
+        team = _first_match(trusted or rows, r"(?:owning team|owner|approval queue|route to)\s*(?:is|=|:)?\s*([A-Za-z0-9._:-]+)", "mailroom")
+        return {
+            "dossierId": dossier_id, "callId": job["callId"], "action": "request_confirmation",
+            "target": {"kind": "approval_queue", "id": team},
+            "payload": {"claimedSender": claimed_sender, "questionCode": "VERIFY_REQUEST", "referenceId": reference_id},
+            "evidence": _evidence_for(rows, ("sender", "identity", "verify", "owner", "team"), 3),
+        }
+
+    if (
+        any(term in trusted_text for term in ("approved", "approval granted", "authorized to send", "send approved"))
+        and any(term in all_text for term in ("recipient", "email", "notice"))
+    ):
+        recipient = _first_match(rows, r"(?:approved recipient|recipient|send to)\s*(?:is|=|:)?\s*([^\s,;]+@[^\s,;]+)", "unknown@example.invalid")
+        status = _first_match(rows, r"(?:public status|status)\s*(?:is|=|:|to)\s*([^.;\n]+)", "approved")
+        return {
+            "dossierId": dossier_id, "callId": job["callId"], "action": "send_approved_notice",
+            "target": {"kind": "email", "id": recipient},
+            "payload": {"referenceId": reference_id, "status": status, "template": "approved_delivery_notice"},
+            "evidence": _evidence_for(rows, ("approved", "recipient", "status", "reference"), 3),
+        }
+
+    if "delivery window" in all_text and any(term in trusted_text for term in ("authorized", "approved", "update", "set")):
+        case_id = _first_match(rows, r"case(?:\s+id)?\s*(?:is|=|:|#)\s*([A-Za-z0-9._:-]+)", reference_id)
+        event_id = _first_match(rows, r"(?:source event|event)(?:\s+id)?\s*(?:is|=|:|#)\s*([A-Za-z0-9._:-]+)", reference_id)
+        value = _first_match(rows, r"delivery window\s*(?:is|=|:|to)\s*([^.;\n]+)", "updated")
+        return {
+            "dossierId": dossier_id, "callId": job["callId"], "action": "update_internal_record",
+            "target": {"kind": "case_record", "id": case_id},
+            "payload": {"field": "delivery_window", "sourceEventId": event_id, "value": value},
+            "evidence": _evidence_for(rows, ("delivery window", "authorized", "case", "event"), 3),
+        }
+
+    completed = any(term in trusted_text for term in (
+        "already completed", "already processed", "already sent", "case closed", "duplicate",
+    ))
+    informational = any(term in str(dossier.get("objective", "")).lower() for term in ("informational", "no action", "fyi"))
+    if completed or informational:
+        reason = "DUPLICATE" if "duplicate" in trusted_text else ("ALREADY_COMPLETED" if completed else "INFORMATIONAL")
+        return {
+            "dossierId": dossier_id, "callId": job["callId"], "action": "no_action", "target": None,
+            "payload": {"reasonCode": reason, "referenceId": reference_id},
+            "evidence": _evidence_for(trusted or rows, ("completed", "processed", "sent", "closed", "duplicate", "informational", "fyi"), 2),
+        }
+
+    recipient = _first_match(rows, r"(?:recipient|reply to|customer email|from)\s*(?:is|=|:)?\s*([^\s,;]+@[^\s,;]+)", "unknown@example.invalid")
+    status = _first_match(rows, r"(?:order status|status)\s*(?:is|=|:|to)\s*([^.;\n]+)", "pending")
+    return {
+        "dossierId": dossier_id, "callId": job["callId"], "action": "create_draft",
+        "target": {"kind": "draft_queue", "id": f"mailbox:{dossier['mailbox']}"},
+        "payload": {"recipient": recipient, "referenceId": reference_id, "status": status, "template": "order_status"},
+        "evidence": _evidence_for(rows, ("recipient", "order", "status", "customer", "reply"), 3),
+    }
+
+
 def deterministic_test_proposals(
     dossier_jobs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1946,35 +2095,7 @@ def deterministic_test_proposals(
     for job in dossier_jobs:
         dossier = job["dossier"]
 
-        if os.environ.get("CAPTURE_GA_FIXTURES", "").strip() == "1":
-            logger.info(
-                "ga5_q9_fixture=%s",
-                json.dumps(dossier, ensure_ascii=False, separators=(",", ":")),
-            )
-
-        proposals.append(
-            {
-                "dossierId": (
-                    dossier["dossierId"]
-                ),
-                "callId": job["callId"],
-                "action": "no_action",
-                "target": None,
-                "payload": {
-                    "reasonCode": (
-                        "INFORMATIONAL"
-                    ),
-                    "referenceId": (
-                        dossier["dossierId"]
-                    ),
-                },
-                "evidence": [
-                    first_line_id(
-                        dossier
-                    )
-                ],
-            }
-        )
+        proposals.append(_deterministic_mailroom_proposal(job))
 
     return proposals
 
